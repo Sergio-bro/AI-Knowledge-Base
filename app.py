@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import threading
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from flask import Flask, request
@@ -28,6 +29,10 @@ db = firestore.client()
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+# ── FIX: In-memory set to track already-processed event IDs ──────────────────
+processed_events = set()
+processed_events_lock = threading.Lock()
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a helpful internal company assistant.
@@ -63,7 +68,7 @@ def ask_claude(question: str, knowledge: str) -> str:
     """Send question + company knowledge to Claude and return the answer."""
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",   # Cheapest + fastest model
+            model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[
@@ -88,6 +93,20 @@ def ask_claude(question: str, knowledge: str) -> str:
 def handle_mention(event, say, client):
     """Triggered whenever someone @mentions the bot in any channel."""
     try:
+        # ── FIX: Deduplicate using event ID ──────────────────────────────────
+        event_id = event.get("event_ts") or event.get("ts")
+        with processed_events_lock:
+            if event_id in processed_events:
+                logger.info(f"Duplicate event ignored: {event_id}")
+                return
+            processed_events.add(event_id)
+            # Keep the set from growing forever — trim if over 1000 entries
+            if len(processed_events) > 1000:
+                oldest = list(processed_events)[:500]
+                for old in oldest:
+                    processed_events.discard(old)
+        # ─────────────────────────────────────────────────────────────────────
+
         thread_ts = event.get("thread_ts", event["ts"])
 
         # Strip the @mention from the question
